@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Pinyon+Script&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.75.0/dist/umd/supabase.js"></script>
 <style>
 [hidden]{display:none!important}
 :root{
@@ -28,6 +29,12 @@ header button{font-size:12.5px;padding:5px 10px}
 header .tabs button{padding:5px 11px}
 header .stats{font-size:12px;gap:10px;flex-wrap:nowrap;white-space:nowrap;overflow:hidden;min-width:0}
 .more{position:relative;flex-shrink:0}
+#bCloud{flex-shrink:0;white-space:nowrap}
+#bCloud.ok{color:#2e7d32;border-color:#a5d6a7}
+#bCloud.busy{color:var(--muted)}
+#bCloud.warn{color:#b26a00;border-color:#ffcc80}
+#bCloud.err{color:#c62828;border-color:#ef9a9a}
+@media (max-width:700px){ #bCloud{font-size:0!important} #bCloud::before{content:"☁";font-size:15px} }
 .menu{position:absolute;right:0;top:calc(100% + 6px);background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 30px rgba(0,0,0,.14);padding:6px;display:flex;flex-direction:column;min-width:210px;z-index:50}
 .menu[hidden]{display:none}
 .menu button{border:none;text-align:left;padding:8px 10px;border-radius:7px;font-size:13px}
@@ -308,6 +315,7 @@ body.view-lista #bGuests{visibility:hidden}
     <button id="bAdd">+ Invitado</button>
     <button id="bCards" class="primary">Tarjetas de mesa</button>
   </div>
+  <button id="bCloud" class="cloud busy" title="El acomodo se guarda solo en la nube. Clic para actualizar">☁ Conectando…</button>
   <div class="more">
     <button id="bMore" aria-haspopup="true">Más ▾</button>
     <div class="menu" id="moreMenu" hidden>
@@ -487,7 +495,10 @@ function migrate(){
   if(state.v === 6){ state.pos.PISTA = centroMesas(); state.v = 7; } // v7: pista movible y centrada
 }
 let moving = false, zoomMul = 1;
-function save(){ try { localStorage.setItem(STORE, JSON.stringify(state)) } catch(e) {} }
+function save(){
+  try { localStorage.setItem(STORE, JSON.stringify(state)) } catch(e) {}
+  if(cloud.editor){ clearTimeout(cloud.timer); cloud.timer = setTimeout(cloudPush, 700); cloudPaint(); }
+}
 
 let filter = {q:'', side:'Todos', pending:false};
 let sel = null; // {type:'person'|'family', id}
@@ -1124,7 +1135,52 @@ $('cvPrint').onclick = async () => { try { await document.fonts.ready } catch(e)
 
 let tt; function toast(m){ const el=$('toast'); el.textContent=m; el.classList.add('show'); clearTimeout(tt); tt=setTimeout(()=>el.classList.remove('show'),2200); }
 
-migrate(); save(); renderChips(); render(); fit();
+// ---------- Nube (Supabase): el mismo acomodo en cualquier dispositivo, sin iniciar sesión ----------
+const SB_URL = 'https://wlsiqwunjwlbgqdkahvb.supabase.co', SB_KEY = 'sb_publishable_BpS7-9bJKHWJrJ6OBSW4PQ_LBFGbNug';
+const ROW = 'principal', CLIENT = Math.random().toString(36).slice(2);
+const sb = window.supabase ? supabase.createClient(SB_URL, SB_KEY) : null;
+const cloud = {editor:false, timer:null, last:''};
+function cloudBadge(txt, cls){ const b = $('bCloud'); b.textContent = txt; b.className = 'cloud '+cls; }
+function cloudPaint(){
+  if(!sb) return cloudBadge('☁ Sin conexión','err');
+  cloud.timer ? cloudBadge('☁ Guardando…','busy') : cloudBadge('☁ Guardado','ok');
+}
+function applyRemote(s){
+  state = s; migrate();
+  try { localStorage.setItem(STORE, JSON.stringify(state)) } catch(e) {}
+  cloud.last = JSON.stringify(state); renderChips(); render();
+}
+async function cloudPull(){
+  if(cloud.timer) return; // hay cambios propios por subir
+  const {data, error} = await sb.from('acomodo').select('data').eq('id', ROW).maybeSingle();
+  if(error){ cloud.editor = false; return cloudBadge('☁ Sin conexión','err'); }
+  cloud.editor = true;
+  if(data && data.data && data.data.families) applyRemote(data.data);
+  else { await cloudPush(); toast('Tu acomodo se subió a la nube'); }
+  cloudPaint();
+}
+async function cloudPush(){
+  cloud.timer = null;
+  const j = JSON.stringify(state);
+  if(j !== cloud.last){
+    const {error} = await sb.from('acomodo').upsert({id:ROW, data:state, cliente:CLIENT, updated_at:new Date().toISOString()});
+    if(error){ cloudBadge('☁ Error','err'); toast('No se guardó en la nube: '+error.message); return; }
+    cloud.last = j;
+  }
+  cloudPaint();
+}
+async function cloudInit(){
+  if(!sb) return cloudPaint();
+  await cloudPull();
+  sb.channel('acomodo').on('postgres_changes', {event:'*', schema:'public', table:'acomodo', filter:'id=eq.'+ROW}, p => {
+    if(!p.new || !p.new.data || p.new.cliente === CLIENT) return;
+    applyRemote(p.new.data); toast('El acomodo se actualizó desde otro dispositivo');
+  }).subscribe();
+  document.addEventListener('visibilitychange', () => { if(!document.hidden) cloudPull(); });
+}
+$('bCloud').onclick = () => { if(sb){ cloudBadge('☁ Actualizando…','busy'); cloudPull(); } };
+
+migrate(); save(); renderChips(); render(); fit(); cloudInit();
 </script>
 </body>
 </html>
